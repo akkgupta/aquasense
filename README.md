@@ -1,112 +1,136 @@
-# Groundwater Level Forecasting Model
+# AquaSense — AI Groundwater Level Forecasting
 
-An AI model that predicts groundwater depth level and its change, from the
-CGWB "changes in depth to water level" dataset (550,850 readings, 23,078
-stations, 2013–2023, across 32 Indian states).
+**Team 7 · PRISMTECH Hackathon · Neural/AI Stream**
 
-## Input schema
+## Description
 
-| Field | Type | Example |
+AquaSense forecasts groundwater depth levels and their change across India,
+trained on real CGWB (Central Ground Water Board) data — 550,850 readings
+from 23,078 monitoring stations across 32 states, spanning 2013–2023.
+
+Given a station's location and its most recent reading, the model predicts:
+
+- **`current_depth_level_m`** — the next depth-to-water level (metres below ground)
+- **`level_difference_m`** — the predicted change vs. the CGWB reference period
+- **`risk_flag`** — `Critical` / `Watch` / `Normal`, derived from the predicted change
+
+The trained model is served through a live website: pick a state, district
+and station, and get an instant forecast — no code required to use it.
+
+**Measured accuracy** (held-out forecast split, not interpolation):
+
+| Model | Accuracy | R² |
 |---|---|---|
-| `date` | string (YYYY-MM-DD) | `2023-11-15` |
-| `state_name` | string | `Tamil Nadu` |
-| `state_code` | int | `33` |
-| `district_name` | string | `Chennai` |
-| `district_code` | int | `601` |
-| `station_name` | string | `Maruthur2` |
-| `latitude` | float | `13.0827` |
-| `longitude` | float | `80.2707` |
-| `basin` | string | `Cauvery Basin` |
-| `sub_basin` | string | `Cauvery` |
-| `source` | string | `CGWB` |
+| Depth level | 77.4% within ±2m | 0.80 |
+| Level change | 59.7% within ±1m | 0.16 |
 
-## Output
+## Tech Stack
 
-| Field | Meaning |
+| Layer | Tool |
 |---|---|
-| `current_depth_level_m` | predicted depth to water level, metres below ground |
-| `level_difference_m` | predicted change vs. the CGWB reference period |
-| `risk_flag` | bonus label: `Critical` / `Watch` / `Normal`, based on the predicted level_difference (a rising depth = water table dropping further) |
+| Model | `HistGradientBoostingRegressor` (scikit-learn) |
+| Feature encoding | `sklearn.preprocessing.TargetEncoder`, lag features, cyclical month encoding |
+| Backend | FastAPI (Python) |
+| Frontend | JavaScript, HTML, CSS (no framework, no build step) |
+| Database | MongoDB (prediction history), with a local-file fallback when no `MONGO_URI` is set |
 
-## Project layout
+## Project Layout
 
 ```
 gwl_project/
-  config.py           file paths & hyperparameters — edit RAW_CSV_PATH if you move the source CSV
-  data_pipeline.py     Step 1: load + clean the raw CSV, build the per-station lookup table
-  features.py           Step 2: lag-feature engineering + categorical target encoding
-  train_model.py        Step 3: trains and saves the two forecasting models
-  predict.py             Step 4: load the saved models and predict for new inputs
-  data/                  put the raw CSV here (already included)
-  models/                 trained models are saved here (created by train_model.py)
-  output/                 metrics report is saved here
+  config.py              File paths & hyperparameters
+  data_pipeline.py        Step 1: load + clean the raw CSV, build the per-station lookup table
+  features.py              Step 2: lag-feature engineering + categorical target encoding
+  train_model.py            Step 3: trains and saves the two forecasting models
+  predict.py                 Step 4: load the saved models and predict for new inputs
+  groundwater_model.py        Single-file version of the full pipeline (interactive console mode)
+  data/                        Raw + cleaned CGWB CSVs, station lookup table
+  models/                       Trained models (created by train_model.py)
+  output/                       Metrics reports, prediction history log
+  webapp/
+    backend/main.py             FastAPI app — serves the model + the frontend
+    frontend/                    index.html, style.css, app.js
 ```
 
-## Running it in PyCharm
+## Setup
 
-1. Open this folder as a PyCharm project.
-2. Create a virtual environment (PyCharm will usually offer to do this automatically), then install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Run the three steps in order (right-click each file → "Run"), or from the terminal:
-   ```
-   python data_pipeline.py     # ~10 seconds — cleans the raw CSV
-   python train_model.py       # ~2 minutes — trains and saves the models
-   python predict.py           # instant — runs the sample prediction at the bottom of the file
-   ```
-4. To predict for your own input, either edit the `SAMPLE_INPUT` dict at the bottom of `predict.py`, or import it into your own script:
-   ```python
-   from predict import predict_one
+### 1. Install dependencies
 
-   result = predict_one({
-       "date": "2024-06-01",
-       "state_name": "Karnataka",
-       "state_code": 29,
-       "district_name": "Bengaluru Urban",
-       "district_code": 601,
-       "station_name": "Some Station",
-       "latitude": 12.9716,
-       "longitude": 77.5946,
-       "basin": "Cauvery Basin",
-       "sub_basin": "Cauvery",
-       "source": "CGWB",
-   })
-   print(result)
-   ```
-   `predict_batch(list_of_input_dicts)` does the same for many rows at once and returns a DataFrame.
+```bash
+pip install -r requirements.txt
+pip install -r webapp/backend/requirements.txt
+```
 
-## How it works
+### 2. Train the model (first time only — trained models are already included, but to retrain from scratch)
 
-- **Lag-feature supervised learning.** Every consecutive pair of readings at a
-  station becomes one training example: "given the station's location and its
-  last known reading, what was the *next* reading?" This is the same
-  structure used at prediction time.
-- **Unseen stations** fall back to the district average, then the state
-  average, then the national average, for the "previous reading" lag feature
-  — so the pipeline never hard-fails on a brand-new station, it just has less
-  to go on.
-- **Two `HistGradientBoostingRegressor` models** (fast on this dataset's
-  ~450K training rows): one predicts the next `currentlevel`, the other the
-  next `level_diff`.
-- **Evaluation** holds out each station's single most recent reading as the
-  test set (a time-respecting split), so the reported R²/MAE reflect genuine
-  forecasting rather than interpolation. Current results (see
-  `output/model_metrics.txt` after training):
-  - `currentlevel`: R² ≈ 0.80, ~9% better MAE than a naive "next = same as
-    last" baseline.
-  - `level_diff`: R² ≈ 0.15, ~49% better MAE than the naive baseline
-    (level_diff is inherently noisier — it's a difference, not a level).
+```bash
+python data_pipeline.py     # cleans the raw CSV, builds the station lookup (~10s)
+python train_model.py       # trains and saves both models (~2 min)
+```
 
-## Known limitations
+### 3. Run the website
 
-- Readings are irregular per station (some report ~2x/year, some far more
-  often via automated loggers), so `gap_days` is a feature but the model
-  is not a true continuous-time series model (no ARIMA/state-space
-  component).
-- No rainfall or extraction-volume data is joined in yet. Adding
-  district-level rainfall (IMD) and CGWB dynamic groundwater resource
-  assessments as extra features would likely improve accuracy further,
-  especially for `level_diff`.
+```bash
+cd webapp/backend
+uvicorn main:app --reload --port 8000
+```
+
+Open **http://localhost:8000** — the form is served from the same server
+that answers the prediction API.
+
+Optional: connect a real MongoDB instance for persistent prediction history
+(otherwise predictions log to a local file automatically):
+
+```bash
+export MONGO_URI="mongodb://localhost:27017"
+```
+
+### 4. Or use the model directly in Python
+
+```python
+from predict import predict_one
+
+result = predict_one({
+    "date": "2024-06-01",
+    "state_name": "Karnataka",
+    "district_name": "Bengaluru Urban",
+    "station_name": "Some Station",
+    "latitude": 12.9716,
+    "longitude": 77.5946,
+    "basin": "Cauvery Basin",
+    "sub_basin": "Cauvery",
+    "source": "CGWB",
+})
+print(result)
+```
+
+## How It Works
+
+- **Lag-feature supervised learning.** Every consecutive pair of readings at
+  a station becomes one training example: "given the station's location and
+  its recent history, what was the *next* reading?" — the same structure
+  used at prediction time.
+- **Expanding per-station history stats** (mean, std, count of readings so
+  far) are computed only from readings up to and including the current one,
+  never future readings, to avoid leakage.
+- **Unseen stations** fall back to the district average, then state, then
+  national average for the lag features, so the pipeline never hard-fails
+  on a new station.
+- **Time-respecting evaluation**: each station's single most recent reading
+  is held out as the test set, so the reported accuracy reflects genuine
+  forecasting rather than interpolation.
+
+## Known Limitations
+
+- Readings are irregular per station (some report ~2x/year, some more often
+  via automated loggers) — `gap_days` is a feature, but this isn't a true
+  continuous-time-series model.
+- No rainfall or groundwater-extraction data is joined in yet; adding
+  district-level rainfall (IMD) would likely improve `level_difference_m`
+  accuracy further.
 - The `risk_flag` thresholds (±2.0 m / ±0.5 m) are illustrative — tune them
-  once you have a domain definition of "critical" depletion for your region.
+  to a domain definition of "critical" depletion for your region.
+
+## Team
+
+Team 7 — AquaSense — Neural/AI Stream — PRISMTECH Hackathon
